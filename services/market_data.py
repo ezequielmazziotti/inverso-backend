@@ -1,11 +1,11 @@
 """
 Servicio de datos de mercado.
-Usa múltiples fuentes con fallbacks para máxima resiliencia desde Render.
+Usa IOL como fuente principal + fallbacks para máxima resiliencia.
 """
 import httpx
-import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
+from services.iol_client import get_token, get_cotizacion, get_historico
 
 # ── MAPEOS ──────────────────────────────────────────────────────
 ASSET_NAMES = {
@@ -26,6 +26,29 @@ ASSET_NAMES = {
     "MEP":   "Dólar MEP · Bursátil",
 }
 
+# Mercado de cada ticker en IOL
+IOL_MERCADO = {
+    "GGAL": "bCBA", "YPF": "bCBA", "PAMP": "bCBA",
+    "BMA":  "bCBA", "SUPV": "bCBA", "VIST": "bCBA",
+    "MELI": "bCBA", "AMZN": "bCBA", "AAPL": "bCBA", "TSLA": "bCBA",
+    "AL30": "bCBA", "GD30": "bCBA", "AE38": "bCBA", "AL35": "bCBA",
+}
+
+# Mapeo Stooq (fallback)
+STOOQ_MAP = {
+    "GGAL": "ggal.ba", "YPF": "ypf.ba", "PAMP": "pamp.ba",
+    "BMA": "bma.ba",   "SUPV": "supv.ba", "VIST": "vist.ba",
+    "AL30": "al30.ba", "GD30": "gd30.ba", "MELI": "meli.us",
+    "AAPL": "aapl.us", "TSLA": "tsla.us", "AMZN": "amzn.us",
+}
+
+YF_MAP = {
+    "GGAL": "GGAL.BA", "YPF": "YPF.BA", "PAMP": "PAMP.BA",
+    "BMA": "BMA.BA",   "SUPV": "SUPV.BA", "VIST": "VIST.BA",
+    "AL30": "AL30.BA", "GD30": "GD30.BA", "MELI": "MELI",
+    "AAPL": "AAPL",    "TSLA": "TSLA",    "AMZN": "AMZN",
+}
+
 FALLBACK_PRICES = {
     "GGAL": {"price": 7200.0,  "change_pct": 1.2},
     "YPF":  {"price": 25000.0, "change_pct": 0.8},
@@ -36,41 +59,84 @@ FALLBACK_PRICES = {
     "MELI": {"price": 28000.0, "change_pct": 0.6},
     "AL30": {"price": 58.0,    "change_pct": 0.3},
     "GD30": {"price": 68.0,    "change_pct": -0.2},
-    "MEP":  {"price": 1250.0,  "change_pct": 0.1},
+    "MEP":  {"price": 1427.0,  "change_pct": 0.0},
 }
 
-# Mapeo Stooq
-STOOQ_MAP = {
-    "GGAL": "ggal.ba", "YPF": "ypf.ba", "PAMP": "pamp.ba",
-    "BMA": "bma.ba", "SUPV": "supv.ba", "VIST": "vist.ba",
-    "AL30": "al30.ba", "GD30": "gd30.ba", "MELI": "meli.us",
-    "AAPL": "aapl.us", "TSLA": "tsla.us", "AMZN": "amzn.us",
-}
 
-# Mapeo Yahoo
-YF_MAP = {
-    "GGAL": "GGAL.BA", "YPF": "YPF.BA", "PAMP": "PAMP.BA",
-    "BMA": "BMA.BA", "SUPV": "SUPV.BA", "VIST": "VIST.BA",
-    "AL30": "AL30.BA", "GD30": "GD30.BA", "MELI": "MELI",
-    "AAPL": "AAPL", "TSLA": "TSLA", "AMZN": "AMZN",
-}
+async def _get_iol_credentials():
+    """Obtiene credenciales de IOL desde config."""
+    from config import settings
+    return settings.IOL_USERNAME, settings.IOL_PASSWORD
 
 
 async def get_asset_data(ticker: str) -> dict:
     ticker = ticker.upper()
 
-    # Fuente 1: Stooq (muy confiable desde servidores externos)
+    # Fuente 1: IOL (tiempo real)
+    data = await _try_iol(ticker)
+    if data:
+        return data
+
+    # Fuente 2: Stooq
     data = await _try_stooq(ticker)
     if data:
         return data
 
-    # Fuente 2: Yahoo Finance directo (sin librería)
+    # Fuente 3: Yahoo Finance directo
     data = await _try_yahoo_direct(ticker)
     if data:
         return data
 
-    # Fallback con precios de referencia
     return _fallback_data(ticker)
+
+
+async def _try_iol(ticker: str) -> Optional[dict]:
+    mercado = IOL_MERCADO.get(ticker)
+    if not mercado:
+        return None
+    try:
+        username, password = await _get_iol_credentials()
+        if not username or not password:
+            return None
+        token = await get_token(username, password)
+        if not token:
+            return None
+
+        cot = await get_cotizacion(ticker, mercado, token)
+        if not cot:
+            return None
+
+        price      = float(cot.get("ultimo", 0) or cot.get("ultimoPrecio", 0) or 0)
+        prev_close = float(cot.get("cierreAnterior", price) or price)
+        change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close > 0 else 0
+
+        if price <= 0:
+            return None
+
+        # Historial
+        hist_raw = await get_historico(ticker, mercado, token)
+        history  = []
+        if hist_raw:
+            for item in hist_raw[::5]:  # cada 5 días
+                fecha = item.get("fechaHora", "")[:10]
+                cierre = float(item.get("ultimoPrecio", 0) or item.get("ultimo", 0) or 0)
+                if fecha and cierre > 0:
+                    history.append({"date": fecha, "price": round(cierre, 2)})
+
+        if not history:
+            history = _generate_history(price)
+
+        return {
+            "ticker":     ticker,
+            "name":       ASSET_NAMES.get(ticker, ticker),
+            "price":      round(price, 2),
+            "change_pct": change_pct,
+            "history":    history,
+            "currency":   "ARS",
+            "source":     "iol",
+        }
+    except Exception:
+        return None
 
 
 async def _try_stooq(ticker: str) -> Optional[dict]:
@@ -188,7 +254,6 @@ async def get_macro_data() -> dict:
 
 
 async def get_mep_price() -> dict:
-    # Fuente 1: dolarapi.com (muy confiable)
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get("https://dolarapi.com/v1/dolares/bolsa",
@@ -200,7 +265,6 @@ async def get_mep_price() -> dict:
                     return {"price": price, "change_pct": 0.0}
     except Exception:
         pass
-    # Fuente 2: Ambito
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get("https://mercados.ambito.com/dolar/mep/info",
@@ -213,7 +277,7 @@ async def get_mep_price() -> dict:
                     return {"price": price, "change_pct": change}
     except Exception:
         pass
-    return {"price": 1250.0, "change_pct": 0.0}
+    return {"price": 1427.0, "change_pct": 0.0}
 
 
 async def get_mep_comparison(ticker: str) -> dict:
