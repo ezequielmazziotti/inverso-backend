@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     ALPHA_VANTAGE_KEY: str = ""
     SECRET_KEY: str = "cambiar-en-produccion"
     ENVIRONMENT: str = "development"
+    IOL_USERNAME: str = ""
+    IOL_PASSWORD: str = ""
 
     class Config:
         env_file = ".env"
