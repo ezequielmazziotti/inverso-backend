@@ -5,7 +5,7 @@ Calcula evolución histórica de carteras fijas y dinámicas.
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, date, timedelta
-from services.market_data import TICKER_MAP
+from services.market_data import YF_MAP as TICKER_MAP
 
 
 async def simulate_fixed_portfolio(amount: float, currency: str, start_date: date, allocations: list) -> dict:
