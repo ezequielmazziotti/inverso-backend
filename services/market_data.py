@@ -216,42 +216,41 @@ async def _try_yahoo_direct(ticker: str) -> Optional[dict]:
 async def get_macro_data() -> dict:
     macro = {
         "usd_oficial": 1050.0, "tasa_politica": 35.0,
-        "reservas_mm": 28500.0, "inflacion_mensual": 2.4, "riesgo_pais": 612,
+        "reservas_mm": 28500.0, "inflacion_mensual": 2.9, "riesgo_pais": 572,
     }
     async with httpx.AsyncClient(timeout=8) as client:
+        # Dólar oficial via dolarapi (confiable)
         try:
-            r = await client.get(
-                f"https://api.bcra.gob.ar/estadisticas/v3.0/datosvariable/4/2025-01-01/{_today()}",
-                headers={"User-Agent": "Mozilla/5.0"}
-            )
+            r = await client.get("https://dolarapi.com/v1/dolares/oficial",
+                                  headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code == 200:
-                data = r.json().get("results", [])
-                if data:
-                    macro["usd_oficial"] = data[-1]["valor"]
+                data = r.json()
+                price = float(data.get("venta", 0))
+                if price > 100:
+                    macro["usd_oficial"] = price
         except Exception:
             pass
+        # Riesgo país via arg.datam.ar
         try:
-            r = await client.get(
-                f"https://api.bcra.gob.ar/estadisticas/v3.0/datosvariable/27/2025-01-01/{_today()}",
-                headers={"User-Agent": "Mozilla/5.0"}
-            )
+            r = await client.get("https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais",
+                                  headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code == 200:
-                data = r.json().get("results", [])
-                if data:
-                    macro["inflacion_mensual"] = data[-1]["valor"]
+                data = r.json()
+                if isinstance(data, list) and data:
+                    macro["riesgo_pais"] = data[-1].get("valor", 572)
         except Exception:
             pass
+        # Inflación via argentinadatos
         try:
-            r = await client.get(
-                "https://mercados.ambito.com//riesgopais/info",
-                headers={"User-Agent": "Mozilla/5.0"}
-            )
+            r = await client.get("https://api.argentinadatos.com/v1/finanzas/indices/inflacion",
+                                  headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code == 200:
-                macro["riesgo_pais"] = r.json().get("valor", 612)
+                data = r.json()
+                if isinstance(data, list) and data:
+                    macro["inflacion_mensual"] = data[-1].get("valor", 2.9)
         except Exception:
             pass
     return macro
-
 
 async def get_mep_price() -> dict:
     try:
